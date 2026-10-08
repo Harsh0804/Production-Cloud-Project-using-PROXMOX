@@ -1370,3 +1370,1660 @@ Paymenter / Billing Order Integration
 End-to-End VPS Provisioning Test
 The implementation will continue from this section in sequence, with each completed practical step and any errors encountered documented before moving to the next stage.
 
+
+
+
+## 6.19 — Public Domain and Cloudflare Configuration
+
+After completing the internal Paymenter deployment and Nginx configuration, the next stage was to make the Paymenter application accessible through a public domain.
+
+The selected production domain for the Paymenter deployment was:
+
+`https://exalith.sysnode.in`
+
+Cloudflare was used as the DNS and public-access layer for the application.
+
+The deployment flow was:
+
+```text
+Internet
+   |
+   v
+Cloudflare
+   |
+   v
+exalith.sysnode.in
+   |
+   v
+Cloudflare Tunnel
+   |
+   v
+Paymenter Server
+   |
+   v
+Nginx
+   |
+   v
+Paymenter Application
+```
+
+This approach allows the Paymenter application to be exposed through HTTPS without directly exposing the internal application service to the public internet.
+
+---
+
+## 6.20 — Cloudflare Nameserver Configuration
+
+The domain was configured to use the Cloudflare-assigned nameservers.
+
+The required nameservers were:
+
+```text
+aitana.ns.cloudflare.com
+ajay.ns.cloudflare.com
+```
+
+Only these two Cloudflare nameservers were retained for the domain configuration.
+
+After updating the nameservers at the domain registrar, the nameserver change was allowed to propagate.
+
+### Verification
+
+The Cloudflare dashboard was checked to confirm that the domain had successfully propagated to Cloudflare.
+
+Result:
+
+```text
+aitana.ns.cloudflare.com   ✅
+ajay.ns.cloudflare.com     ✅
+```
+
+The successful nameserver propagation allowed Cloudflare DNS and the subsequent tunnel configuration to become active for the domain.
+
+### Important Note
+
+Nameserver propagation can take some time depending on the registrar, DNS caching, and TTL values. The domain should not be considered ready for production access until Cloudflare confirms that the nameservers are active.
+
+---
+
+## 6.21 — Paymenter Database Password Verification
+
+During the public deployment process, the Paymenter database credentials needed to be verified.
+
+The Paymenter database password is stored in the application's `.env` file.
+
+The configured database password was checked using:
+
+```bash
+grep DB_PASSWORD /var/www/paymenter/.env
+```
+
+The `.env` file was treated as the source of truth for the application's database connection configuration.
+
+### Security Note
+
+The actual database password must not be included in this documentation or committed to Git.
+
+Only the verification procedure is documented.
+
+---
+
+## 6.22 — Paymenter Database Application URL Investigation
+
+After the public domain was configured, Paymenter was still referencing its previous local URL instead of the new public domain.
+
+The application was expected to use:
+
+```text
+https://exalith.sysnode.in
+```
+
+However, the database contained the following value:
+
+```text
+app_url = http://localhost
+```
+
+This explained why changing the application's `.env` configuration alone did not completely resolve the URL issue.
+
+Paymenter was reading the application URL from its database settings.
+
+---
+
+## 6.23 — MariaDB Reserved Word Error
+
+While querying the Paymenter database, an SQL error was encountered because the column name:
+
+```text
+key
+```
+
+is a reserved keyword in MariaDB/SQL syntax.
+
+The initial query could therefore not safely reference the `key` column without escaping it.
+
+### Error Cause
+
+The `settings` table contains a column named:
+
+```text
+key
+```
+
+MariaDB interprets `key` as a reserved SQL keyword.
+
+### Resolution
+
+The column was escaped using backticks:
+
+```sql
+`key`
+```
+
+The corrected query was:
+
+```bash
+mysql -u root -p paymenter -e "SELECT * FROM settings WHERE \`key\` LIKE '%url%' OR \`key\` LIKE '%domain%';"
+```
+
+This successfully allowed the Paymenter settings table to be inspected.
+
+### Result
+
+The database query identified:
+
+```text
+app_url = http://localhost
+```
+
+The old localhost value was therefore confirmed as the reason Paymenter continued to reference the local application URL.
+
+---
+
+## 6.24 — Update Paymenter Application URL in Database
+
+After identifying the incorrect database value, the Paymenter `app_url` setting was updated to the public HTTPS domain.
+
+The following command was used:
+
+```bash
+mysql -u root -p paymenter -e "UPDATE settings SET \`value\`='https://exalith.sysnode.in' WHERE \`key\`='app_url';"
+```
+
+This changed the Paymenter database configuration from:
+
+```text
+http://localhost
+```
+
+to:
+
+```text
+https://exalith.sysnode.in
+```
+
+The database was therefore aligned with the public deployment URL.
+
+---
+
+## 6.25 — Clear Paymenter Application Cache
+
+After modifying the database setting, the Paymenter application cache was cleared so that the application would reload the updated configuration.
+
+Change to the Paymenter directory:
+
+```bash
+cd /var/www/paymenter
+```
+
+Clear all relevant Laravel/Paymenter cached configuration:
+
+```bash
+php artisan optimize:clear
+```
+
+This removes cached configuration, routes, views, and other optimized application data that could otherwise cause Paymenter to continue using the previous URL.
+
+---
+
+## 6.26 — Reload Nginx
+
+After clearing the application cache, Nginx was reloaded:
+
+```bash
+systemctl reload nginx
+```
+
+The reload applied the current Nginx configuration without requiring a complete server reboot.
+
+The application stack was now:
+
+```text
+Cloudflare
+    |
+    v
+Cloudflare Tunnel
+    |
+    v
+Nginx
+    |
+    v
+Paymenter
+    |
+    v
+MariaDB
+```
+
+---
+
+## 6.27 — Cloudflare Tunnel and HTTPS Configuration
+
+The Paymenter application was connected to the public domain through Cloudflare.
+
+The final public hostname was:
+
+```text
+exalith.sysnode.in
+```
+
+The application was accessed using:
+
+```text
+https://exalith.sysnode.in
+```
+
+Cloudflare provided the public HTTPS access layer for the application.
+
+This removed the need to expose the internal Paymenter service directly through a public HTTP port.
+
+### Public Access Flow
+
+```text
+User Browser
+     |
+     | HTTPS
+     v
+Cloudflare
+     |
+     | Cloudflare Tunnel
+     v
+Paymenter Server
+     |
+     v
+Nginx
+     |
+     v
+/var/www/paymenter/public
+```
+
+---
+
+## 6.28 — Paymenter Public Access Verification
+
+After completing the Cloudflare configuration, database URL correction, cache clearing, and Nginx reload, the public Paymenter URL was tested.
+
+Open:
+
+```text
+https://exalith.sysnode.in
+```
+
+The Paymenter landing page successfully loaded.
+
+The interface displayed:
+
+```text
+Welcome to Paymenter
+```
+
+The available authentication options were also visible, including:
+
+```text
+Login
+Register
+```
+
+The Paymenter web application was therefore successfully reachable through the configured public HTTPS domain.
+
+---
+
+## 6.29 — Final Paymenter Deployment Verification
+
+The final deployment was verified through the public domain.
+
+| Component                                  | Status |
+| ------------------------------------------ | ------ |
+| Paymenter application installed            | ✅      |
+| Paymenter internal deployment              | ✅      |
+| MariaDB database                           | ✅      |
+| Paymenter `.env` configured                | ✅      |
+| Database credentials verified              | ✅      |
+| Cloudflare nameservers configured          | ✅      |
+| `aitana.ns.cloudflare.com`                 | ✅      |
+| `ajay.ns.cloudflare.com`                   | ✅      |
+| Nameserver propagation                     | ✅      |
+| Cloudflare domain configuration            | ✅      |
+| Cloudflare Tunnel                          | ✅      |
+| Public hostname configured                 | ✅      |
+| HTTPS access                               | ✅      |
+| Paymenter database `app_url` identified    | ✅      |
+| MariaDB `key` reserved-word issue resolved | ✅      |
+| `app_url` updated in database              | ✅      |
+| Paymenter application cache cleared        | ✅      |
+| Nginx reloaded                             | ✅      |
+| Public Paymenter URL accessible            | ✅      |
+| Paymenter dashboard/landing page verified  | ✅      |
+
+Final public URL:
+
+```text
+https://exalith.sysnode.in
+```
+
+---
+
+## 6.30 — Errors Encountered During Public Paymenter Deployment
+
+### Error 1 — Paymenter Continued Using `localhost`
+
+**Problem:**
+
+After configuring the public domain, Paymenter continued referencing:
+
+```text
+http://localhost
+```
+
+instead of:
+
+```text
+https://exalith.sysnode.in
+```
+
+**Investigation:**
+
+The Paymenter database settings were queried and the following value was found:
+
+```text
+app_url = http://localhost
+```
+
+**Root Cause:**
+
+The application URL was stored in the Paymenter database and therefore the database value was overriding the expected public application URL.
+
+**Resolution:**
+
+The database setting was updated:
+
+```bash
+mysql -u root -p paymenter -e "UPDATE settings SET \`value\`='https://exalith.sysnode.in' WHERE \`key\`='app_url';"
+```
+
+The application cache was then cleared:
+
+```bash
+cd /var/www/paymenter
+php artisan optimize:clear
+```
+
+Nginx was reloaded:
+
+```bash
+systemctl reload nginx
+```
+
+The application was then tested again using the public HTTPS URL.
+
+---
+
+### Error 2 — MariaDB `key` Reserved Word
+
+**Problem:**
+
+The Paymenter settings query generated an SQL syntax issue when attempting to use the `key` column directly.
+
+**Root Cause:**
+
+`key` is a reserved keyword in MariaDB/SQL.
+
+**Resolution:**
+
+The column name was escaped with backticks:
+
+```sql
+`key`
+```
+
+Correct query:
+
+```bash
+mysql -u root -p paymenter -e "SELECT * FROM settings WHERE \`key\` LIKE '%url%' OR \`key\` LIKE '%domain%';"
+```
+
+The query then successfully returned the relevant Paymenter settings.
+
+---
+
+### Error 3 — Public Domain Not Initially Active
+
+**Problem:**
+
+The public domain could not be used until the domain's nameservers were correctly delegated to Cloudflare.
+
+**Root Cause:**
+
+The domain was not yet using the required Cloudflare nameservers.
+
+**Resolution:**
+
+The domain nameservers were changed to:
+
+```text
+aitana.ns.cloudflare.com
+ajay.ns.cloudflare.com
+```
+
+After propagation completed, Cloudflare successfully recognized the domain.
+
+Result:
+
+```text
+Cloudflare Nameserver Propagation    ✅
+Domain Active in Cloudflare          ✅
+```
+
+---
+
+## 6.31 — Final Public Architecture
+
+The Paymenter deployment now follows the architecture below:
+
+```text
+                         Internet
+                            |
+                            v
+                    Cloudflare DNS
+                            |
+                            v
+                exalith.sysnode.in
+                            |
+                            v
+                  Cloudflare Tunnel
+                            |
+                            v
+                     Paymenter Server
+                            |
+                            v
+                         Nginx
+                            |
+                            v
+                 /var/www/paymenter
+                            |
+             +--------------+--------------+
+             |                             |
+             v                             v
+        Paymenter App                  MariaDB
+```
+
+The application is no longer dependent on the previous localhost URL for public access.
+
+The final application URL is:
+
+```text
+https://exalith.sysnode.in
+```
+
+---
+
+## 6.32 — Current Project Status
+
+The Paymenter deployment has progressed from an internal test installation to a publicly accessible HTTPS application.
+
+Completed implementation stages:
+
+```text
+Internal VM Network
+        ↓
+vmbr2 Configuration
+        ↓
+NAT / Internet Access
+        ↓
+Paymenter Installation
+        ↓
+MariaDB Configuration
+        ↓
+Composer / Application Setup
+        ↓
+Nginx Configuration
+        ↓
+Cloudflare Nameserver Configuration
+        ↓
+Nameserver Propagation
+        ↓
+Cloudflare Tunnel
+        ↓
+Public Domain
+        ↓
+Paymenter Database URL Correction
+        ↓
+Application Cache Clear
+        ↓
+Nginx Reload
+        ↓
+HTTPS Verification
+        ↓
+Paymenter Dashboard / Landing Page
+```
+
+Final result:
+
+**Paymenter is successfully accessible through the public HTTPS domain:**
+
+```text
+https://exalith.sysnode.in
+```
+
+The next stage can continue with the planned billing-to-Proxmox automation layer, including:
+
+```text
+Paymenter Product Configuration
+        ↓
+Proxmox API Integration
+        ↓
+Cloud-Init Template Selection
+        ↓
+IP Pool / Customer IP Allocation
+        ↓
+Automatic VM Provisioning
+        ↓
+Resource Assignment
+        ↓
+Cloud-Init Network Injection
+        ↓
+Customer VM Delivery
+        ↓
+End-to-End Automated VPS Provisioning Test
+```
+
+
+Section 7 — Convoy Deployment, Paymenter Integration Path, and Customer Network Preparation
+
+This section is a lossless documentation conversion of the implementation notes recorded in test(1).md and test(3).md.
+
+Documentation rule used for this section: the implementation content, commands, configuration values, paths, troubleshooting details, errors, corrections, and pending checks are retained. Only the original chat-style presentation has been changed into a structured project-documentation format.
+
+7.1 — Paymenter Server Integration Decision
+
+After the Paymenter installation and initial application setup, the next activity was to configure a server/infrastructure integration from the Paymenter interface.
+
+The Paymenter server configuration area was opened through:
+
+Extensions → Servers
+
+At this stage, there was initially nothing configured under the server section.
+
+The available server-type options shown in Paymenter were:
+
+cPanel
+Convoy
+DirectAdmin
+Enhance
+Plesk
+Pterodactyl
+IrtFusion
+Virtualizor
+
+7.1.1 — Proxmox Option Not Available
+
+Proxmox was not present in the available server-type list.
+
+The initial conclusion during the setup was that the Paymenter Proxmox extension was not installed.
+
+The Paymenter extension area was checked as the next step:
+
+Extensions → Extensions
+
+The direct/official Proxmox extension available there was identified as paid.
+
+7.1.2 — Free Integration Requirement
+
+Because the requirement was to use a free solution, the alternatives visible in the Paymenter environment were evaluated.
+
+Two relevant options identified during the process were:
+
+Virtualizor
+Convoy
+
+Convoy was selected for this project because it was considered suitable for the intended architecture:
+
+Open source
+
+Proxmox-native support
+
+Paymenter integration path
+
+Free to use for the selected implementation
+
+Active development was considered during the selection
+
+The selected implementation approach became:
+
+Paymenter
+    ↓
+Convoy
+    ↓
+Proxmox Cluster
+
+The deployment plan was therefore to create a dedicated VM for Convoy, install Convoy on it, connect Convoy to Proxmox, and later connect Paymenter to Convoy.
+
+7.2 — VM111 Creation for Convoy
+
+A new VM was planned/created on Node1 for the Convoy application.
+
+The recorded VM configuration was:
+
+Setting
+
+Value
+
+VM ID
+
+111
+
+Name
+
+convoy
+
+OS
+
+Ubuntu 22.04
+
+RAM
+
+1GB
+
+CPU
+
+1 core
+
+Disk
+
+20GB
+
+Initial Network
+
+vmbr0
+
+The Ubuntu 22.04 ISO was to be attached through the Proxmox Web UI.
+
+7.2.1 — Ubuntu ISO Configuration
+
+In the Proxmox Web UI:
+
+VM111 (convoy)
+→ Hardware
+→ CD/DVD Drive
+→ Edit
+→ Use CD/DVD disc image file (iso)
+
+The Ubuntu 22.04 ISO was to be selected from the available ISO storage.
+
+If the ISO was not already available, the recorded download location was:
+
+node1 → local storage → ISO Images → Upload
+
+or download directly from:
+
+https://releases.ubuntu.com/22.04/ubuntu-22.04.5-live-server-amd64.iso
+
+The installation notes also included checking whether the Ubuntu ISO was already available in the cluster before downloading another copy.
+
+7.3 — Error: VM111 Attached to the Wrong Network Bridge
+
+During the Convoy VM setup, a network configuration problem was identified.
+
+Problem
+
+VM111 was initially connected to:
+
+vmbr0
+
+However, the VM was intended to communicate through the internal Proxmox network using:
+
+vmbr2
+
+The internal network used in the project was the 10.10.10.x network.
+
+Impact
+
+The VM was connected to the public bridge while being intended for the internal network. This prevented the VM from correctly communicating with the internal gateway.
+
+Resolution — Proxmox Web UI
+
+The recorded correction was:
+
+VM111 → Hardware → Network Device (net0)
+→ Edit
+→ Bridge: vmbr0 → vmbr2
+→ OK
+→ VM Restart
+
+After the change, the VM network was to be tested from the VM console with:
+
+ping -c 3 10.10.10.1
+
+The network mismatch was subsequently considered resolved.
+
+Status: ✅ Resolved.
+
+7.4 — VM111 Network Validation Before Convoy Installation
+
+Once the VM111 bridge was corrected to vmbr2, the next step was to verify internet access before installing Convoy.
+
+The recorded verification commands were:
+
+ping -c 3 8.8.8.8
+apt update
+
+The purpose was to confirm both basic external connectivity and APT repository access so that Convoy installation would not encounter an unexpected network problem.
+
+The implementation notes later recorded:
+
+1 and 2 done
+
+meaning the internet-access check and Convoy installation were completed.
+
+Status: ✅ Completed.
+
+7.5 — Convoy Installation on VM111
+
+Convoy was installed on VM111 after the internet check was completed.
+
+The installation was completed successfully.
+
+Status: ✅ Completed.
+
+The project then proceeded to Step 3: connecting Convoy to the Proxmox environment.
+
+7.5.1 — Integration Rationale
+
+The implementation notes used the following analogy to explain the integration:
+
+Convoy is the hotel manager.
+Proxmox is the building.
+The Proxmox API token is the master key card required by the manager
+so that rooms/VMs can be created and managed.
+
+The formal architecture being implemented was:
+
+Paymenter
+   ↓
+ Convoy
+   ↓
+Proxmox Cluster
+
+7.6 — Proxmox API Token for Convoy
+
+Convoy requires authenticated access to the Proxmox API. An API token was created on Node1.
+
+7.6.1 — Create Token in Proxmox Web UI
+
+Navigate to:
+
+Datacenter → Permissions → API Tokens → Add
+
+The recorded values were:
+
+Field
+
+Value
+
+User
+
+root@pam
+
+Token ID
+
+convoy
+
+Privilege Separation
+
+Unchecked
+
+The implementation notes specifically recorded that Privilege Separation was unchecked because otherwise the token would not have the required permissions for the integration stage.
+
+When the token was created, the secret was displayed once. The secret was to be copied and stored securely.
+
+Security rule: the actual token secret is not reproduced in this document.
+
+7.6.2 — Token Reference Used by Convoy
+
+The token reference used in the Convoy configuration was:
+
+root@pam!convoy
+
+7.7 — Convoy Location Configuration
+
+The Convoy administrator interface was used to define a logical infrastructure location.
+
+Navigate to:
+
+Admin → Locations
+
+An example location name recorded during the setup was:
+
+Mumbai-IntechDC
+
+This location was used to group the Proxmox infrastructure for the deployment.
+
+7.8 — Node1 Registration in Convoy
+
+After the Proxmox API token was created, Node1 was prepared for registration in Convoy.
+
+Navigate to:
+
+Admin → Nodes → New Node
+
+The recorded Node1 values were:
+
+Field
+
+Value
+
+Location
+
+The newly created Convoy location
+
+FQDN/IP
+
+10.10.10.1
+
+Port
+
+8006
+
+Token ID
+
+root@pam!convoy
+
+Secret
+
+Proxmox Convoy API-token secret
+
+Cluster
+
+Existing Proxmox cluster name
+
+Storage
+
+VM disk storage, for example local-lvm
+
+Memory Overallocation
+
+Initially low/0%
+
+Disk Overallocation
+
+Initially low/0%
+
+The IP address:
+
+10.10.10.1
+
+was the Node1 vmbr2 address reachable from VM111.
+
+7.8.1 — Convoy Node Connection Test
+
+Saving the node in Convoy triggers a connection check.
+
+If the check fails, the Proxmox API endpoint can be tested directly from VM111 using:
+
+curl -k https://10.10.10.1:8006
+
+A response from this endpoint indicates network reachability and shifts the troubleshooting focus toward:
+
+API token
+
+Token secret
+
+FQDN/IP
+
+Cluster name
+
+Storage selection
+
+Convoy node configuration
+
+The recorded implementation plan was to confirm Node1 first before adding Node2 and Node3.
+
+7.9 — Planned Node2 and Node3 Registration
+
+Node2 and Node3 were not to be added until Node1 connectivity had been confirmed.
+
+The planned Node2/Node3 internal addresses were recorded as:
+
+Node2 → 10.10.10.2
+Node3 → corresponding internal vmbr2 address
+
+The same general Convoy node-registration procedure would be repeated for the remaining cluster nodes.
+
+Status: ⏳ Pending at this checkpoint.
+
+7.10 — Error: Diagnostic Commands Executed on the Wrong Node
+
+During the network investigation, commands intended for Node1 were accidentally executed on Node3.
+
+Problem
+
+The shell prompt showed:
+
+root@node3
+
+rather than root@node1.
+
+Impact
+
+No configuration damage occurred because the commands being checked at that point were read-only diagnostic commands.
+
+Resolution
+
+The node identity was verified from the shell prompt, Node3 was exited, and the next validation was redirected to Node1.
+
+The recorded command to return from Node3 was:
+
+exit
+
+The operational rule established during troubleshooting was:
+
+Before any node-specific configuration or validation,
+verify the hostname/prompt first.
+
+Status: ✅ Resolved.
+
+7.11 — Error / Change-Control Issue: Backup File Reused
+
+During troubleshooting, the following command was executed again:
+
+cp /etc/network/interfaces /root/interfaces.bak3
+
+Because the same destination filename was reused, the previous backup was overwritten.
+
+Result
+
+The backup file:
+
+/root/interfaces.bak3
+
+no longer represented the exact configuration state from before the original vmbr3 change.
+
+The notes specifically recorded that the backup had become a later-state copy containing the vmbr3 configuration rather than a clean pre-vmbr3 baseline.
+
+Node3 Observation
+
+The Node3 output itself was considered correct:
+
+Observed Rule
+
+Meaning
+
+MASQUERADE 10.20.0.0/16
+
+Customer VM internet NAT was present
+
+DROP ... 10.10.0.0/16
+
+Customer VMs were prevented from reaching the protected internal/management network
+
+DROP ... 172.17.17.0/24
+
+Customer VMs were prevented from reaching the specified protected network
+
+A separate INPUT rule existed for TCP ports 22 and 8006 and did not appear in the FORWARD-chain output.
+
+The recorded command to check it was:
+
+iptables -L INPUT -n | grep vmbr3
+
+The expected output was a DROP rule covering TCP ports:
+
+22,8006
+
+The notes also explicitly stated that the | character in the command should be entered through SSH rather than the Proxmox browser console where special characters could be problematic.
+
+7.12 — Node1 NAT and FORWARD Validation Before vmbr3 Addition
+
+After leaving Node3, the intended Node1 shell checks were:
+
+exit
+
+Then, on Node1:
+
+cp /etc/network/interfaces /root/interfaces.bak3
+iptables -t nat -L POSTROUTING -n
+iptables -L FORWARD -n
+
+The expected existing NAT entry was:
+
+10.10.10.0/24 → MASQUERADE
+
+which supported the VM110/VM111 internal network and internet access.
+
+The notes explicitly stated that no new vmbr3 configuration should be added until the Node1 FORWARD-chain output had been reviewed.
+
+7.13 — Dedicated Customer VM Network: vmbr3
+
+A dedicated customer workload bridge, vmbr3, was prepared for the customer VM network.
+
+The intended network was:
+
+Customer VMs
+     |
+   vmbr3
+     |
+10.20.0.0/16
+     |
+   vmbr0
+     |
+ Internet
+
+The design objectives were:
+
+Customer workloads use 10.20.0.0/16.
+
+Customer traffic is NATed through vmbr0.
+
+Customer workloads cannot access the protected 10.10.0.0/16 network.
+
+Customer workloads cannot access the specified 172.17.17.0/24 network.
+
+Customer workloads cannot access Proxmox SSH (22) or Web UI (8006) through vmbr3.
+
+7.13.1 — Exact vmbr3 Configuration
+
+The configuration block recorded during the implementation was:
+
+auto vmbr3
+iface vmbr3 inet static
+        address 10.20.0.1/16
+        bridge-ports none
+        bridge-stp off
+        bridge-fd 0
+        post-up   echo 1 > /proc/sys/net/ipv4/ip_forward
+        post-up   iptables -t nat -A POSTROUTING -s 10.20.0.0/16 -o vmbr0 -j MASQUERADE
+        post-up   iptables -I FORWARD -i vmbr3 -d 172.17.17.0/24 -j DROP
+        post-up   iptables -I FORWARD -i vmbr3 -d 10.10.0.0/16 -j DROP
+        post-up   iptables -I INPUT -i vmbr3 -p tcp -m multiport --dports 22,8006 -j DROP
+        post-down iptables -t nat -D POSTROUTING -s 10.20.0.0/16 -o vmbr0 -j MASQUERADE
+        post-down iptables -D FORWARD -i vmbr3 -d 172.17.17.0/24 -j DROP
+        post-down iptables -D FORWARD -i vmbr3 -d 10.10.0.0/16 -j DROP
+        post-down iptables -D INPUT -i vmbr3 -p tcp -m multiport --dports 22,8006 -j DROP
+
+Before editing the file, the recorded backup command was:
+
+cp /etc/network/interfaces /root/interfaces.bak3
+
+7.14 — Error: vmbr3 Missing on Node1
+
+During Node1 validation, the following error was observed:
+
+Device "vmbr3" does not exist
+
+7.14.1 — Root Cause
+
+The vmbr3 configuration block had not been successfully added/saved in:
+
+/etc/network/interfaces
+
+before ifreload -a was executed.
+
+The existing working configuration remained intact:
+
+vmbr0              → remained operational
+vmbr2              → remained operational
+10.10.10.0/24 NAT  → remained present
+Paymenter          → unaffected
+Convoy             → unaffected
+
+7.14.2 — Step 1: Verify Whether vmbr3 Exists
+
+On Node1:
+
+grep -n vmbr3 /etc/network/interfaces
+
+If the command returns no output, the vmbr3 block is not present in the file.
+
+7.14.3 — Step 2: Backup and Add vmbr3
+
+Create a new backup:
+
+cp /etc/network/interfaces /root/interfaces.bak3
+
+Edit the network configuration:
+
+nano /etc/network/interfaces
+
+The vmbr3 block was to be placed at the end of the file, below the existing:
+
+source /etc/network/interfaces.d/*
+
+entry.
+
+The block was to be pasted without changing the working vmbr0 and vmbr2 configuration.
+
+7.14.4 — Browser Console Special-Character Issue
+
+The notes recorded that the vmbr3 configuration contained characters such as:
+
+{
+|
+>
+
+and that these characters could break when the configuration was pasted into the Proxmox browser console.
+
+The documented workaround was to paste the configuration through SSH or another terminal application instead.
+
+The exact recorded instruction was to use SSH/terminal for the configuration rather than the Proxmox browser console because the special characters had already caused problems there.
+
+7.14.5 — Step 3: Apply the Configuration
+
+After saving the configuration:
+
+ifreload -a
+
+7.15 — Node1 Network Validation After vmbr3 Configuration
+
+The recorded validation commands were:
+
+ifreload -a
+ip -br a show vmbr3
+ip -br a show vmbr2
+ip -br a show vmbr0
+iptables -t nat -L POSTROUTING -n
+
+The expected values were:
+
+vmbr3 → 10.20.0.1/16
+vmbr2 → 10.10.10.1/24
+vmbr0 → existing public/uplink address
+
+The recorded Node1 public address at this stage was:
+
+154.61.74.142/24
+
+The NAT table was expected to contain both of these networks:
+
+10.10.10.0/24 → existing VM/test-network MASQUERADE
+10.20.0.0/16  → customer vmbr3 MASQUERADE
+
+The purpose of the check was to ensure that the addition of vmbr3 did not alter the working vmbr0 or vmbr2 configuration.
+
+7.16 — Node1 FORWARD-Chain Validation
+
+The exact command that remained required for Node1 was:
+
+iptables -L FORWARD -n
+
+This was necessary because the existing Node1 FORWARD rules had not yet been reviewed and could potentially conflict with the new customer-network forwarding/NAT rules.
+
+The implementation notes explicitly recorded that this output had not yet been provided at that checkpoint.
+
+Status: ⏳ Pending.
+
+7.17 — Service Availability Check After Network Changes
+
+After the network changes, the two deployed public application endpoints were to be checked:
+
+https://convoy.sysnode.in
+https://exalith.sysnode.in
+
+These checks were intended to verify that the customer-network bridge changes did not affect the existing Convoy and Paymenter application services.
+
+7.17.1 — Rollback Command
+
+The recorded rollback commands were:
+
+cp /root/interfaces.bak3 /etc/network/interfaces
+ifreload -a
+
+Because /root/interfaces.bak3 had previously been overwritten during troubleshooting, the notes explicitly warned that the backup must be verified before treating it as the original pre-change configuration.
+
+7.18 — Full Errors and Troubleshooting Record
+
+This subsection consolidates the implementation issues while retaining the individual troubleshooting details already recorded above.
+
+Error 1 — Paymenter Proxmox Option Not Available
+
+Observed: Proxmox did not appear in the Paymenter server-type list.
+
+Available options observed:
+
+cPanel
+Convoy
+DirectAdmin
+Enhance
+Plesk
+Pterodactyl
+IrtFusion
+Virtualizor
+
+Finding: the direct Paymenter Proxmox extension was identified as paid.
+
+Resolution: Convoy was selected as the free/open-source Proxmox integration path.
+
+Status: ✅ Resolved.
+
+Error 2 — VM111 Attached to vmbr0 Instead of vmbr2
+
+Problem: VM111 was attached to the public bridge while the intended IP/gateway belonged to the internal network.
+
+Resolution through Proxmox Web UI:
+
+VM111 → Hardware → Network Device (net0)
+→ Edit
+→ Bridge: vmbr0 → vmbr2
+→ OK
+→ Restart VM
+
+Validation command:
+
+ping -c 3 10.10.10.1
+
+Status: ✅ Resolved.
+
+Error 3 — Temporary failure resolving 'deb.debian.org'
+
+The earlier test VM produced APT repository errors including:
+
+Err:3 https://deb.debian.org/debian bookworm InRelease
+  Temporary failure resolving 'deb.debian.org'
+Err:4 https://deb.debian.org/debian bookworm-updates InRelease
+  Temporary failure resolving 'deb.debian.org'
+Err:5 https://deb.debian.org/debian bookworm-backports InRelease
+  Temporary failure resolving 'deb.debian.org'
+Err:6 https://deb.debian.org/debian-security bookworm-security InRelease
+  Temporary failure resolving 'deb.debian.org'
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+All packages are up to date.
+
+Warnings recorded were:
+
+W: Failed to fetch mirror+file:/etc/apt/mirrors/debian.list/dists/bookworm/InRelease  Temporary failure resolving 'deb.debian.org'
+W: Failed to fetch mirror+file:/etc/apt/mirrors/debian.list/dists/bookworm-updates/InRelease  Temporary failure resolving 'deb.debian.org'
+W: Failed to fetch mirror+file:/etc/apt/mirrors/debian-security.list/dists/bookworm-security/InRelease  Temporary failure resolving 'deb.debian.org'
+W: Some index files failed to download. They have been ignored, or old ones used instead.
+
+Recorded root-cause direction:
+
+VM networking mismatch + lack of a working external route
+
+The networking/NAT correction was therefore performed before continuing.
+
+Status: ✅ Resolved as part of the VM networking/NAT correction.
+
+Error 4 — .env Variable Concatenation
+
+The malformed variable line was:
+
+REDIS_PORT=6379DB_CHARSET=utf8mb4
+
+The correction was:
+
+REDIS_PORT=6379
+DB_CHARSET=utf8mb4
+
+The relevant variables were then verified with:
+
+grep -E "REDIS_PORT|DB_CHARSET|DB_COLLATION" .env
+
+The configuration cache was cleared using:
+
+sudo php artisan config:clear
+
+and database migration was retried with:
+
+sudo php artisan migrate --force
+
+Status: ✅ Resolved.
+
+Error 5 — Duplicate Paymenter Cron Entry
+
+The same scheduler entry appeared twice:
+
+* * * * * php /var/www/paymenter/artisan schedule:run >> /dev/null 2>&1
+* * * * * php /var/www/paymenter/artisan schedule:run >> /dev/null 2>&1
+
+The duplicate was removed with:
+
+sudo crontab -l | sort -u | sudo crontab -
+
+Verification command:
+
+sudo crontab -l
+
+Status: ✅ Resolved.
+
+Error 6 — Commands Executed on Node3 Instead of Node1
+
+Problem: the shell prompt showed:
+
+root@node3
+
+when Node1 was intended.
+
+Impact: none, because the commands were read-only diagnostics.
+
+Resolution: exit Node3 and verify root@node1 before continuing.
+
+exit
+
+Status: ✅ Resolved.
+
+Error 7 — /root/interfaces.bak3 Backup Overwritten
+
+The backup command was used again:
+
+cp /etc/network/interfaces /root/interfaces.bak3
+
+This overwrote the earlier backup.
+
+Impact: the file could no longer be treated as the exact pre-change baseline.
+
+Resolution: document the backup-state limitation and use unique backup names for future sequential network changes.
+
+Status: ⚠️ Documented.
+
+Error 8 — Device "vmbr3" does not exist
+
+Problem: Node1 did not have the vmbr3 bridge active after ifreload -a.
+
+Root cause: the bridge block was not successfully present/saved in /etc/network/interfaces before the reload.
+
+Verification:
+
+grep -n vmbr3 /etc/network/interfaces
+
+Configuration file edited:
+
+/etc/network/interfaces
+
+Configuration block:
+
+auto vmbr3
+iface vmbr3 inet static
+        address 10.20.0.1/16
+        bridge-ports none
+        bridge-stp off
+        bridge-fd 0
+        post-up   echo 1 > /proc/sys/net/ipv4/ip_forward
+        post-up   iptables -t nat -A POSTROUTING -s 10.20.0.0/16 -o vmbr0 -j MASQUERADE
+        post-up   iptables -I FORWARD -i vmbr3 -d 172.17.17.0/24 -j DROP
+        post-up   iptables -I FORWARD -i vmbr3 -d 10.10.0.0/16 -j DROP
+        post-up   iptables -I INPUT -i vmbr3 -p tcp -m multiport --dports 22,8006 -j DROP
+        post-down iptables -t nat -D POSTROUTING -s 10.20.0.0/16 -o vmbr0 -j MASQUERADE
+        post-down iptables -D FORWARD -i vmbr3 -d 172.17.17.0/24 -j DROP
+        post-down iptables -D FORWARD -i vmbr3 -d 10.10.0.0/16 -j DROP
+        post-down iptables -D INPUT -i vmbr3 -p tcp -m multiport --dports 22,8006 -j DROP
+
+Apply:
+
+ifreload -a
+
+Status: ⏳ Validation was still in progress at the documented checkpoint.
+
+Error 9 — Proxmox Browser Console Special Characters
+
+The network configuration contained special characters such as:
+
+{
+|
+>
+
+The notes recorded that these could break when pasted through the Proxmox browser console.
+
+Resolution: paste through SSH or another terminal application instead.
+
+Status: ✅ Workaround established.
+
+Error / Check 10 — Node1 FORWARD Chain Not Yet Reviewed
+
+The required command was:
+
+iptables -L FORWARD -n
+
+The output was still required before treating the Node1 vmbr3 configuration as fully validated.
+
+Status: ⏳ Pending.
+
+7.19 — Current Implementation Status
+
+Component
+
+Status
+
+Paymenter server integration path evaluated
+
+✅
+
+Direct Paymenter Proxmox option
+
+❌ Not available in shown list / official extension identified as paid
+
+Convoy selected as integration path
+
+✅
+
+VM111 created/planned for Convoy
+
+✅
+
+VM111 network mismatch identified
+
+✅
+
+VM111 moved from vmbr0 to vmbr2
+
+✅
+
+VM111 internal gateway validation
+
+✅ Completed as recorded
+
+VM111 internet access check
+
+✅ Completed
+
+Convoy installation on VM111
+
+✅ Completed
+
+Proxmox API token for Convoy
+
+✅ Created
+
+Convoy Location
+
+✅ Prepared
+
+Node1 Convoy registration
+
+⏳ Integration stage
+
+Convoy → Proxmox complete connection
+
+⏳ Not yet fully confirmed
+
+Node2 Convoy registration
+
+⏳ Pending
+
+Node3 Convoy registration
+
+⏳ Pending
+
+Node3 vmbr3 validation
+
+✅ Present/validated
+
+Node1 vmbr3
+
+⏳ Validation in progress
+
+Node1 FORWARD-chain validation
+
+⏳ Pending
+
+Paymenter → Convoy integration
+
+⏳ Pending
+
+Automatic VM provisioning
+
+⏳ Pending
+
+Automatic customer IP assignment
+
+⏳ Pending
+
+End-to-end billing → provisioning test
+
+⏳ Pending
+
+7.20 — Complete Command Reference from This Implementation Stage
+
+The following commands appeared across the recorded implementation notes and are retained here without removing the troubleshooting commands:
+
+VM / Network Validation
+
+ping -c 3 10.10.10.1
+ping -c 3 8.8.8.8
+apt update
+
+Proxmox VM Network Correction
+
+qm stop 101
+qm set 101 --net0 virtio,bridge=vmbr2
+qm start 101
+
+Convoy → Proxmox Connectivity
+
+curl -k https://10.10.10.1:8006
+
+Node Navigation / Identity
+
+exit
+
+Network Configuration Backup
+
+cp /etc/network/interfaces /root/interfaces.bak3
+
+Inspect Existing NAT / Forwarding
+
+iptables -t nat -L POSTROUTING -n
+iptables -L FORWARD -n
+iptables -L INPUT -n | grep vmbr3
+
+Verify vmbr3 Configuration
+
+grep -n vmbr3 /etc/network/interfaces
+
+Edit Network Configuration
+
+nano /etc/network/interfaces
+
+Apply Network Configuration
+
+ifreload -a
+
+Validate Interfaces
+
+ip -br a show vmbr3
+ip -br a show vmbr2
+ip -br a show vmbr0
+
+Paymenter .env Verification / Recovery
+
+grep -E "REDIS_PORT|DB_CHARSET|DB_COLLATION" .env
+sudo php artisan config:clear
+sudo php artisan migrate --force
+
+Paymenter Cron Cleanup / Verification
+
+sudo crontab -l
+sudo crontab -l | sort -u | sudo crontab -
+
+Network Rollback
+
+cp /root/interfaces.bak3 /etc/network/interfaces
+ifreload -a
+
+7.21 — Configuration Files Referenced in This Stage
+
+The following configuration files/paths were explicitly involved in the recorded implementation:
+
+/etc/network/interfaces
+/root/interfaces.bak3
+.env
+/etc/nginx/sites-available/paymenter.conf
+
+The vmbr3 configuration belongs in:
+
+/etc/network/interfaces
+
+The Paymenter environment correction involved:
+
+.env
+
+The Paymenter Nginx configuration referenced during the earlier implementation stage was:
+
+/etc/nginx/sites-available/paymenter.conf
+
+The notes also referenced the Paymenter web root:
+
+/var/www/paymenter/public
+
+and the Paymenter scheduler command path:
+
+/var/www/paymenter/artisan
+
+7.22 — Next Implementation Stage
+
+The recorded next-stage sequence was:
+
+Complete Node1 vmbr3 validation
+        ↓
+Review Node1 FORWARD rules
+        ↓
+Confirm Convoy → Proxmox API connection
+        ↓
+Add Node2 to Convoy
+        ↓
+Add Node3 to Convoy
+        ↓
+Validate storage/resource configuration
+        ↓
+Connect Paymenter to Convoy
+        ↓
+        ↓
+Implement customer IP allocation
+        ↓
+Run end-to-end order → VM provisioning test
+
+At this documentation checkpoint, the complete automated workflow:
+
+Customer Order
+      ↓
+Paymenter
+      ↓
+Convoy
+      ↓
+Proxmox Cluster
+      ↓
+Automatic VM Creation
+      ↓
+Customer IP Assignment
+      ↓
+Customer Delivery
+
+was still under implementation and was not to be marked as completed.
